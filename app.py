@@ -4,6 +4,7 @@ from PIL import Image
 import uvicorn
 import io
 import torch
+import base64
 
 # Import the predictor class
 from src.pipeline import BillRoiPredictor
@@ -13,16 +14,16 @@ from config import MODEL_PATH, CONFIDENCE_THRESHOLD
 app = FastAPI()
 predictor = BillRoiPredictor(model_path=MODEL_PATH)  # Update with your actual model path
 
-class PredictionResponse(BaseModel):
+class CroppedImageResponse(BaseModel):
     boxes: list
     scores: list
     labels: list
+    cropped_images: list  # List of cropped images in byte form
 
-
-@app.post("/predict", response_model=PredictionResponse)
+@app.post("/predict", response_model=CroppedImageResponse)
 async def predict(image: UploadFile = File(...)):
     """
-    Predict bounding boxes for the uploaded image.
+    Predict bounding boxes for the uploaded image and return cropped images.
     """
     try:
         # Read image bytes and convert to PIL Image
@@ -32,26 +33,36 @@ async def predict(image: UploadFile = File(...)):
         # Perform prediction
         predictions = predictor.predict_image(pil_image)
 
-        # Extract bounding boxes, scores, labels, and masks
-        boxes = predictions[0]["boxes"] if "boxes" in predictions[0] else torch.tensor([])
-        scores = predictions[0]["scores"] if "scores" in predictions[0] else torch.tensor([])
-        labels = predictions[0]["labels"] if "labels" in predictions[0] else torch.tensor([])
-        masks = predictions[0]["masks"] if "masks" in predictions[0] else torch.tensor([])
+        # Extract bounding boxes, scores, labels
+        boxes = predictions[0].get("boxes", torch.tensor([]))
+        scores = predictions[0].get("scores", torch.tensor([]))
+        labels = predictions[0].get("labels", torch.tensor([]))
 
         # Apply confidence threshold to filter valid detections
         valid_detections = scores >= CONFIDENCE_THRESHOLD
         boxes = boxes[valid_detections].tolist()
         scores = scores[valid_detections].tolist()
         labels = labels[valid_detections].tolist()
-        masks = masks[valid_detections].tolist()
+        
+        # Extract cropped images and convert to byte form
+        cropped_images = []
+        for box in boxes:
+            x_min, y_min, x_max, y_max = map(int, box)
+            cropped_img = pil_image.crop((x_min, y_min, x_max, y_max))
+            img_bytes_io = io.BytesIO()
+            cropped_img.save(img_bytes_io, format="PNG")
+            cropped_image_bytes = base64.b64encode(img_bytes_io.getvalue()).decode("utf-8")
+            cropped_images.append(cropped_image_bytes)
 
         return {
             "boxes": boxes,
             "scores": scores,
-            "labels": labels
+            "labels": labels,
+            "cropped_images": cropped_images  # Base64 encoded cropped images
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
+
 if __name__ == '__main__':
     uvicorn.run("app:app", host="0.0.0.0", port=5000)
