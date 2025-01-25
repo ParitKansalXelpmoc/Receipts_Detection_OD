@@ -1,3 +1,5 @@
+import numpy as np
+
 # IoU Calculation Function
 def iou(box1, box2):
     x1, y1, x2, y2 = box1
