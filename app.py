@@ -1,22 +1,31 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from pydantic import BaseModel
-from PIL import Image
-import uvicorn
 import io
 import torch
+import torchvision.transforms.functional as F
+import numpy as np
 
-# Import the predictor class
+# Custom imports
 from src.pipeline import BillRoiPredictor
 from config import MODEL_PATH, CONFIDENCE_THRESHOLD
+from src.post_processing import iou, merge_boxes_iteratively
 
 # Initialize FastAPI app and predictor
 app = FastAPI()
 predictor = BillRoiPredictor(model_path=MODEL_PATH)  # Update with your actual model path
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 class PredictionResponse(BaseModel):
     boxes: list
     scores: list
     labels: list
+
+
+# Load and preprocess image
+def load_image(image_bytes):
+    pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    return F.to_tensor(pil_image).to(device)
 
 
 @app.post("/predict", response_model=PredictionResponse)
@@ -27,31 +36,38 @@ async def predict(image: UploadFile = File(...)):
     try:
         # Read image bytes and convert to PIL Image
         image_bytes = await image.read()
-        pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        
+        # Load image as tensor
+        image_tensor = load_image(image_bytes)
 
         # Perform prediction
-        predictions = predictor.predict_image(pil_image)
+        with torch.no_grad():
+            prediction = predictor.predict_image(image_tensor)
 
-        # Extract bounding boxes, scores, labels, and masks
-        boxes = predictions[0]["boxes"] if "boxes" in predictions[0] else torch.tensor([])
-        scores = predictions[0]["scores"] if "scores" in predictions[0] else torch.tensor([])
-        labels = predictions[0]["labels"] if "labels" in predictions[0] else torch.tensor([])
-        masks = predictions[0]["masks"] if "masks" in predictions[0] else torch.tensor([])
+        boxes = prediction[0]["boxes"].cpu().numpy()
+        scores = prediction[0]["scores"].cpu().numpy()
+        labels = prediction[0]["labels"].cpu().numpy()
 
         # Apply confidence threshold to filter valid detections
         valid_detections = scores >= CONFIDENCE_THRESHOLD
-        boxes = boxes[valid_detections].tolist()
-        scores = scores[valid_detections].tolist()
-        labels = labels[valid_detections].tolist()
-        masks = masks[valid_detections].tolist()
+        boxes = boxes[valid_detections]
+        scores = scores[valid_detections]
+        labels = labels[valid_detections]
 
+        # Merge boxes using IoU
+        merged_boxes = merge_boxes_iteratively(boxes, iou_threshold=0.1)
+
+        # Return the results
         return {
-            "boxes": boxes,
-            "scores": scores,
-            "labels": labels
+            "boxes": merged_boxes.tolist(),
+            "scores": scores.tolist(),
+            "labels": labels.tolist(),
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
+
+
 if __name__ == '__main__':
+    import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=5000)
