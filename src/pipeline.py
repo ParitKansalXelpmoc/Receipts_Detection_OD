@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from config import *
+from src.post_processing import iou, merge_boxes_iteratively
 
 class BillRoiPredictor:
     def __init__(self, model_path):
@@ -48,4 +49,17 @@ class BillRoiPredictor:
         image_tensor = self._get_transforms(image).unsqueeze(0).to(self.device)
         with torch.no_grad():
             predictions = self.model(image_tensor)
-        return predictions
+        
+        boxes = predictions[0]["boxes"].cpu().numpy()
+        scores = predictions[0]["scores"].cpu().numpy()
+        labels = predictions[0]["labels"].cpu().numpy()
+
+        # Apply confidence threshold to filter valid detections
+        valid_detections = scores >= CONFIDENCE_THRESHOLD
+        boxes = boxes[valid_detections]
+        scores = scores[valid_detections]
+        labels = labels[valid_detections]
+
+        # Merge boxes using IoU
+        boxes = merge_boxes_iteratively(boxes, iou_threshold=0.1)
+        return boxes, scores, labels

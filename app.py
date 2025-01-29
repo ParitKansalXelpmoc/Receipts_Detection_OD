@@ -4,11 +4,11 @@ import io
 import torch
 import torchvision.transforms.functional as F
 import numpy as np
+from PIL import Image
 
 # Custom imports
 from src.pipeline import BillRoiPredictor
 from config import MODEL_PATH, CONFIDENCE_THRESHOLD
-from src.post_processing import iou, merge_boxes_iteratively
 
 # Initialize FastAPI app and predictor
 app = FastAPI()
@@ -22,12 +22,6 @@ class PredictionResponse(BaseModel):
     labels: list
 
 
-# Load and preprocess image
-def load_image(image_bytes):
-    pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    return F.to_tensor(pil_image).to(device)
-
-
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(image: UploadFile = File(...)):
     """
@@ -36,30 +30,15 @@ async def predict(image: UploadFile = File(...)):
     try:
         # Read image bytes and convert to PIL Image
         image_bytes = await image.read()
-        
-        # Load image as tensor
-        image_tensor = load_image(image_bytes)
+        pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
         # Perform prediction
         with torch.no_grad():
-            prediction = predictor.predict_image(image_tensor)
-
-        boxes = prediction[0]["boxes"].cpu().numpy()
-        scores = prediction[0]["scores"].cpu().numpy()
-        labels = prediction[0]["labels"].cpu().numpy()
-
-        # Apply confidence threshold to filter valid detections
-        valid_detections = scores >= CONFIDENCE_THRESHOLD
-        boxes = boxes[valid_detections]
-        scores = scores[valid_detections]
-        labels = labels[valid_detections]
-
-        # Merge boxes using IoU
-        merged_boxes = merge_boxes_iteratively(boxes, iou_threshold=0.1)
+            boxes, scores, labels = predictor.predict_image(pil_image)
 
         # Return the results
         return {
-            "boxes": merged_boxes.tolist(),
+            "boxes": boxes.tolist(),
             "scores": scores.tolist(),
             "labels": labels.tolist(),
         }
